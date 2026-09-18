@@ -1,0 +1,22 @@
+html,body{margin:0;min-height:100%;background:#000;color:#fff;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+body{display:flex;justify-content:center;padding:16px}
+#redscapes-v1-3{display:flex;justify-content:center;width:100%}
+#redscapes-v1-3 *{box-sizing:border-box}
+.game-wrap{width:min(100%,420px)}
+.game{position:relative;width:100%;aspect-ratio:9/16;background:#000;overflow:hidden;border:1px solid rgba(255,255,255,.08);outline:none;touch-action:none;user-select:none;-webkit-user-select:none}
+canvas{display:block;width:100%;height:100%;background:#000;image-rendering:pixelated}
+.room-name{position:absolute;inset:0;z-index:3;display:flex;align-items:center;justify-content:center;pointer-events:none;text-align:center;color:rgba(255,255,255,.16);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:clamp(17px,5vw,25px);font-weight:600;letter-spacing:.22em;text-transform:uppercase;padding:20px}
+.asset-layer{position:absolute;inset:0;z-index:8;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,.84);padding:24px;transition:none!important;animation:none!important}
+.asset-layer.open{display:flex}
+.asset-image{display:block;max-width:100%;max-height:100%;width:auto;height:auto;object-fit:contain;border:none;box-shadow:none;background:transparent}
+.asset-close{position:absolute;top:14px;right:14px;z-index:9;appearance:none;border:none;background:rgba(255,255,255,.05);color:rgba(255,255,255,.72);width:34px;height:34px;border-radius:999px;display:grid;place-items:center;font-size:24px;line-height:1;cursor:pointer}
+.asset-close:active{background:rgba(255,255,255,.10)}
+.asset-close:focus-visible{outline:2px solid rgba(255,255,255,.65);outline-offset:2px}
+.mobile-controls{position:absolute;left:18px;bottom:18px;z-index:5;pointer-events:none}
+.joystick{width:110px;height:110px;pointer-events:none}
+.joystick-base{position:relative;width:110px;height:110px;border-radius:50%;border:1px solid rgba(255,255,255,.04);background:radial-gradient(circle at center, rgba(255,255,255,.022) 0%, rgba(255,255,255,.014) 42%, rgba(255,255,255,.008) 65%, rgba(255,255,255,.002) 100%);box-shadow:inset 0 0 0 1px rgba(255,255,255,.008);pointer-events:auto;touch-action:none;-webkit-backdrop-filter:blur(1px);backdrop-filter:blur(1px)}
+.joystick-base::before,.joystick-base::after{content:"";position:absolute;background:rgba(255,255,255,.022)}
+.joystick-base::before{left:50%;top:18px;transform:translateX(-50%);width:1px;height:74px}
+.joystick-base::after{top:50%;left:18px;transform:translateY(-50%);height:1px;width:74px}
+.joystick-knob{position:absolute;left:50%;top:50%;width:42px;height:42px;transform:translate(-50%,-50%);border-radius:50%;border:1px solid rgba(255,255,255,.05);background:radial-gradient(circle at 35% 35%, rgba(255,255,255,.065), rgba(255,255,255,.028) 58%, rgba(255,255,255,.012) 100%);box-shadow:0 0 0 1px rgba(255,255,255,.006), inset 0 0 8px rgba(255,255,255,.02);transition:transform .04s linear}
+@media (max-width:360px){.asset-layer{padding:16px}.mobile-controls{left:12px;bottom:12px}.joystick,.joystick-base{width:98px;height:98px}.joystick-base::before{height:64px;top:17px}.joystick-base::after{width:64px;left:17px}.joystick-knob{width:38px;height:38px}}

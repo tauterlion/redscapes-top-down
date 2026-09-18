@@ -1,0 +1,5 @@
+Place your heartbeat sound here as:
+heartbeat.mp3
+
+The game loops it and scales its volume from 0% to a maximum of 50%
+based on distance from the black figure in the Containment room.

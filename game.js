@@ -1,0 +1,708 @@
+(() => {
+  const root = document.getElementById('redscapes-v1-3');
+  if (!root || root.dataset.initialized === '1') return;
+  root.dataset.initialized = '1';
+
+  const canvas = root.querySelector('#rsCanvas13');
+  const ctx = canvas.getContext('2d');
+  const game = root.querySelector('.game');
+  const roomName = root.querySelector('#roomName13');
+  const assetLayer = root.querySelector('#assetLayer13');
+  const assetImage = root.querySelector('#assetImage13');
+  const assetClose = root.querySelector('#assetClose13');
+  const joystickBase = root.querySelector('#joystickBase13');
+  const joystickKnob = root.querySelector('#joystickKnob13');
+
+  const darknessCanvas = document.createElement('canvas');
+  darknessCanvas.width = 360;
+  darknessCanvas.height = 640;
+  const darkCtx = darknessCanvas.getContext('2d');
+
+  const W = 360, H = 640, TILE = 20, COLS = 18, ROWS = 32;
+  const VISION_RADIUS = 250;
+  const WALL_REVEAL = 3.5;
+  const RAY_EPSILON = 0.00012;
+  const LIGHT_TINT_ALPHA = 0.05;
+  const EDGE_OUTLINE_ALPHA = 0.035;
+  const JOYSTICK_RADIUS = 34;
+  const JOYSTICK_DEADZONE = 0.16;
+
+  const COLORS = {
+    background: '#000',
+    wall: '#55514d',
+    window: 'rgba(150, 150, 150, 0.26)',
+    player: '#cf1f2c',
+    paper: '#b9b6aa',
+    table: '#2f2b28'
+  };
+
+  const TILE_EMPTY = 0;
+  const TILE_WALL = 1;
+  const TILE_WINDOW = 2;
+
+  const ASSETS = {
+    paperPickup: { type:'audio', filename:'picking-up-paper.mp3', src:'assets/audio/picking-up-paper.mp3' },
+    heartbeat: { type:'audio', filename:'heartbeat.mp3', src:'assets/audio/heartbeat.mp3' },
+    archiveNote01: { type:'image', filename:'RS_ARCHIVE_NOTE_01.png', src:'assets/documents/RS_ARCHIVE_NOTE_01.png', pickupSound:'paperPickup', alt:'Recovered archive note' }
+  };
+
+  const player = { x:180, y:545, radius:7, speed:110 };
+  const held = { ArrowUp:false, ArrowDown:false, ArrowLeft:false, ArrowRight:false };
+  const stick = { active:false, x:0, y:0, pointerId:null };
+  const HEARTBEAT_MAX_VOLUME = 0.5;
+  const HEARTBEAT_MAX_DISTANCE = 225;
+  const HEARTBEAT_FULL_DISTANCE = 24;
+  let heartbeatAudio = null;
+  let heartbeatUnlocked = false;
+  let currentRoomId = 'reception';
+  let documentOpen = false;
+  let lastTime = performance.now();
+  let touchingItems = new Set();
+  let nextArchiveFlickerAt = performance.now() + 4200;
+  let archiveFlickerEndAt = 0;
+
+  const makeGrid = () => Array.from({ length: ROWS }, () => Array(COLS).fill(TILE_EMPTY));
+
+  function wallRect(grid, x, y, w, h, type = TILE_WALL) {
+    for (let row = y; row < y + h; row++) {
+      for (let col = x; col < x + w; col++) {
+        if (row >= 0 && row < ROWS && col >= 0 && col < COLS) grid[row][col] = type;
+      }
+    }
+  }
+
+  function addOuterWalls(grid) {
+    wallRect(grid,0,0,COLS,1); wallRect(grid,0,ROWS-1,COLS,1);
+    wallRect(grid,0,0,1,ROWS); wallRect(grid,COLS-1,0,1,ROWS);
+  }
+
+  function openEdge(grid,side,start,length){
+    for(let i=start;i<start+length;i++){
+      if(side==='top'&&i>=0&&i<COLS)grid[0][i]=TILE_EMPTY;
+      if(side==='bottom'&&i>=0&&i<COLS)grid[ROWS-1][i]=TILE_EMPTY;
+      if(side==='left'&&i>=0&&i<ROWS)grid[i][0]=TILE_EMPTY;
+      if(side==='right'&&i>=0&&i<ROWS)grid[i][COLS-1]=TILE_EMPTY;
+    }
+  }
+
+  function buildReception(){
+    const g=makeGrid(); addOuterWalls(g); openEdge(g,'top',8,2); openEdge(g,'right',15,3);
+    wallRect(g,3,7,5,1); wallRect(g,3,7,1,6); wallRect(g,11,7,4,1); wallRect(g,14,7,1,5);
+    wallRect(g,5,20,8,1); wallRect(g,5,20,1,5); wallRect(g,12,20,1,5); return g;
+  }
+
+  function buildResearch(){
+    const g=makeGrid(); addOuterWalls(g); openEdge(g,'bottom',8,2); openEdge(g,'left',8,3); openEdge(g,'left',21,3);
+    wallRect(g,4,5,1,9); wallRect(g,4,5,5,1); wallRect(g,9,10,5,1); wallRect(g,13,10,1,7);
+    wallRect(g,3,20,6,1); wallRect(g,8,20,1,6); wallRect(g,11,24,4,1); wallRect(g,11,24,1,5); return g;
+  }
+
+  function buildRecords(){
+    const g=makeGrid(); addOuterWalls(g); openEdge(g,'right',8,3); openEdge(g,'top',12,2);
+    wallRect(g,3,5,8,1); wallRect(g,3,9,8,1); wallRect(g,3,13,8,1); wallRect(g,3,17,8,1);
+    wallRect(g,13,8,1,11); wallRect(g,13,18,3,1); wallRect(g,4,23,10,1); wallRect(g,4,23,1,5); return g;
+  }
+
+  function buildArchive(){
+    const g=makeGrid(); addOuterWalls(g); openEdge(g,'bottom',12,2); openEdge(g,'left',21,3);
+    wallRect(g,3,6,12,1); wallRect(g,3,6,1,8); wallRect(g,14,6,1,8);
+    wallRect(g,6,16,1,9); wallRect(g,11,16,1,9); wallRect(g,6,24,6,1); return g;
+  }
+
+  function buildObservation(){
+    const g=makeGrid(); addOuterWalls(g); openEdge(g,'right',21,3); openEdge(g,'top',8,2);
+    wallRect(g,3,7,12,1); wallRect(g,3,7,1,12); wallRect(g,14,7,1,12); wallRect(g,3,18,12,1);
+    wallRect(g,8,10,2,6); wallRect(g,4,23,4,1); wallRect(g,11,23,3,1); return g;
+  }
+
+  function buildContainment(){
+    const g=makeGrid(); addOuterWalls(g); openEdge(g,'bottom',8,2);
+    wallRect(g,3,7,12,1); wallRect(g,3,7,1,15); wallRect(g,14,7,1,15); wallRect(g,3,21,5,1); wallRect(g,10,21,5,1);
+    wallRect(g,6,11,6,1,TILE_WINDOW); wallRect(g,6,11,1,6,TILE_WINDOW); wallRect(g,11,11,1,6,TILE_WINDOW); wallRect(g,6,16,6,1,TILE_WINDOW);
+    return g;
+  }
+
+  function buildService(){
+    const g=makeGrid(); addOuterWalls(g); openEdge(g,'left',15,3); openEdge(g,'right',21,3);
+    wallRect(g,6,6,1,9); wallRect(g,6,6,8,1); wallRect(g,13,6,1,9); wallRect(g,5,20,9,1); wallRect(g,5,26,9,1); return g;
+  }
+
+  const ROOMS = {
+    reception:{name:'Reception',grid:buildReception(),exits:[
+      {side:'top',start:8,length:2,to:'research',spawn:{x:180,y:598}},
+      {side:'right',start:15,length:3,to:'service',spawn:{x:35,y:330}}
+    ],items:[
+      {id:'rec-console-1',kind:'decor',decorType:'console',x:180,y:456,width:54,height:22},
+      {id:'rec-crate-1',kind:'decor',decorType:'crate',x:84,y:160,size:24},
+      {id:'rec-sign-1',kind:'decor',decorType:'sign',x:287,y:164,width:28,height:14}
+    ]},
+    research:{name:'Research Hall',grid:buildResearch(),exits:[
+      {side:'bottom',start:8,length:2,to:'reception',spawn:{x:180,y:42}},
+      {side:'left',start:8,length:3,to:'records',spawn:{x:325,y:190}},
+      {side:'left',start:21,length:3,to:'service',spawn:{x:325,y:450}}
+    ],items:[
+      {id:'res-console-1',kind:'decor',decorType:'console',x:128,y:340,width:48,height:20},
+      {id:'res-cab-1',kind:'decor',decorType:'cabinet',x:270,y:544,width:24,height:44},
+      {id:'res-crate-1',kind:'decor',decorType:'crate',x:64,y:96,size:22}
+    ]},
+    records:{name:'Records',grid:buildRecords(),exits:[
+      {side:'right',start:8,length:3,to:'research',spawn:{x:35,y:190}},
+      {side:'top',start:12,length:2,to:'archive',spawn:{x:260,y:598}}
+    ],items:[
+      {id:'rec-rack-1',kind:'decor',decorType:'rack',x:260,y:350,width:34,height:104},
+      {id:'rec-rack-2',kind:'decor',decorType:'rack',x:260,y:234,width:34,height:84},
+      {id:'rec-cab-2',kind:'decor',decorType:'cabinet',x:92,y:552,width:24,height:42}
+    ]},
+    archive:{name:'Archive',grid:buildArchive(),exits:[
+      {side:'bottom',start:12,length:2,to:'records',spawn:{x:260,y:42}},
+      {side:'left',start:21,length:3,to:'observation',spawn:{x:325,y:450}}
+    ],items:[
+      {id:'arc-rack-1',kind:'decor',decorType:'rack',x:116,y:188,width:28,height:62},
+      {id:'arc-rack-2',kind:'decor',decorType:'rack',x:246,y:188,width:28,height:62},
+      {id:'arc-table-1',kind:'table',x:180,y:220,width:74,height:30},
+      {id:'doc-1',kind:'asset',assetId:'archiveNote01',x:180,y:207,radius:13},
+      {id:'arc-cab-1',kind:'decor',decorType:'cabinet',x:170,y:510,width:26,height:42}
+    ]},
+    observation:{name:'Observation',grid:buildObservation(),exits:[
+      {side:'right',start:21,length:3,to:'archive',spawn:{x:35,y:450}},
+      {side:'top',start:8,length:2,to:'containment',spawn:{x:180,y:598}}
+    ],items:[
+      {id:'obs-console-1',kind:'decor',decorType:'console',x:180,y:276,width:56,height:22},
+      {id:'obs-sign-1',kind:'decor',decorType:'sign',x:180,y:510,width:30,height:15}
+    ]},
+    containment:{name:'Containment',grid:buildContainment(),exits:[
+      {side:'bottom',start:8,length:2,to:'observation',spawn:{x:180,y:42}}
+    ],items:[
+      {id:'con-shadow-player',kind:'decor',decorType:'shadowPlayer',x:180,y:280},
+      {id:'con-marker-1',kind:'decor',decorType:'marker',x:90,y:470,size:18},
+      {id:'con-marker-2',kind:'decor',decorType:'marker',x:270,y:470,size:18}
+    ]},
+    service:{name:'Service Passage',grid:buildService(),exits:[
+      {side:'left',start:15,length:3,to:'reception',spawn:{x:325,y:330}},
+      {side:'right',start:21,length:3,to:'research',spawn:{x:35,y:450}}
+    ],items:[
+      {id:'ser-crate-1',kind:'decor',decorType:'crate',x:84,y:474,size:24},
+      {id:'ser-crate-2',kind:'decor',decorType:'crate',x:274,y:474,size:24},
+      {id:'ser-vent-1',kind:'decor',decorType:'vent',x:180,y:230,width:34,height:16}
+    ]}
+  };
+
+  function isOpaqueWallValue(value){ return value === TILE_WALL; }
+  function isSolidTileValue(value){ return value === TILE_WALL || value === TILE_WINDOW; }
+
+  function buildSegments(grid){
+    const seg=[];
+    const isOpaqueWall=(r,c)=>r>=0&&r<ROWS&&c>=0&&c<COLS&&isOpaqueWallValue(grid[r][c]);
+    for(let r=0;r<ROWS;r++) for(let c=0;c<COLS;c++){
+      if(!isOpaqueWall(r,c)) continue;
+      const x=c*TILE,y=r*TILE,x2=x+TILE,y2=y+TILE;
+      if(!isOpaqueWall(r-1,c))seg.push({x1:x,y1:y,x2:x2,y2:y});
+      if(!isOpaqueWall(r+1,c))seg.push({x1:x,y1:y2,x2:x2,y2:y2});
+      if(!isOpaqueWall(r,c-1))seg.push({x1:x,y1:y,x2:x,y2:y2});
+      if(!isOpaqueWall(r,c+1))seg.push({x1:x2,y1:y,x2:x2,y2:y2});
+    }
+    return seg;
+  }
+
+  for(const room of Object.values(ROOMS)) room.segments=buildSegments(room.grid);
+
+  function pointInExit(exit,x,y){
+    const start=exit.start*TILE,end=(exit.start+exit.length)*TILE;
+    return exit.side==='top'||exit.side==='bottom' ? x>=start&&x<=end : y>=start&&y<=end;
+  }
+
+  function findCrossedExit(nx,ny){
+    for(const exit of ROOMS[currentRoomId].exits){
+      if(exit.side==='left'&&nx-player.radius<=0&&pointInExit(exit,nx,ny))return exit;
+      if(exit.side==='right'&&nx+player.radius>=W&&pointInExit(exit,nx,ny))return exit;
+      if(exit.side==='top'&&ny-player.radius<=0&&pointInExit(exit,nx,ny))return exit;
+      if(exit.side==='bottom'&&ny+player.radius>=H&&pointInExit(exit,nx,ny))return exit;
+    }
+    return null;
+  }
+
+  function circleHitsGrid(cx,cy,radius,grid){
+    const minC=Math.max(0,Math.floor((cx-radius)/TILE));
+    const maxC=Math.min(COLS-1,Math.floor((cx+radius)/TILE));
+    const minR=Math.max(0,Math.floor((cy-radius)/TILE));
+    const maxR=Math.min(ROWS-1,Math.floor((cy+radius)/TILE));
+    for(let r=minR;r<=maxR;r++) for(let c=minC;c<=maxC;c++){
+      if(!isSolidTileValue(grid[r][c])) continue;
+      const rx=c*TILE,ry=r*TILE;
+      const nx=Math.max(rx,Math.min(cx,rx+TILE));
+      const ny=Math.max(ry,Math.min(cy,ry+TILE));
+      const dx=cx-nx,dy=cy-ny;
+      if(dx*dx+dy*dy<radius*radius)return true;
+    }
+    return false;
+  }
+
+  function canMoveTo(nx,ny){
+    if(findCrossedExit(nx,ny))return true;
+    if(nx-player.radius<0||ny-player.radius<0||nx+player.radius>W||ny+player.radius>H)return false;
+    return !circleHitsGrid(nx,ny,player.radius,ROOMS[currentRoomId].grid);
+  }
+
+
+  function randomBetween(min, max){
+    return min + Math.random() * (max - min);
+  }
+
+  function setRoomLabel(value){
+    if(roomName.textContent !== value) roomName.textContent = value;
+  }
+
+  function updateRoomLabel(now){
+    const room = ROOMS[currentRoomId];
+    if(!room) return;
+    if(currentRoomId !== 'archive'){
+      setRoomLabel(room.name);
+      return;
+    }
+    if(now >= archiveFlickerEndAt && now >= nextArchiveFlickerAt){
+      archiveFlickerEndAt = now + randomBetween(130, 240);
+      nextArchiveFlickerAt = archiveFlickerEndAt + randomBetween(4000, 7000);
+    }
+    if(now < archiveFlickerEndAt){
+      const phase = Math.floor(now / 40) % 2;
+      setRoomLabel(phase === 0 ? 'PAPER.' : room.name);
+    } else {
+      setRoomLabel(room.name);
+    }
+  }
+
+  function hardCutTo(exit){
+    currentRoomId=exit.to; player.x=exit.spawn.x; player.y=exit.spawn.y;
+    if(currentRoomId === 'archive') {
+      nextArchiveFlickerAt = performance.now() + randomBetween(1500, 3000);
+      archiveFlickerEndAt = 0;
+    }
+    setRoomLabel(ROOMS[currentRoomId].name); touchingItems.clear();
+    for(const key of Object.keys(held))held[key]=false;
+    resetJoystick();
+    draw();
+  }
+
+  function playAudioAsset(assetId){
+    const asset=ASSETS[assetId];
+    if(!asset||asset.type!=='audio'||!asset.src)return;
+    try{
+      const audio=new Audio(asset.src); audio.preload='auto'; audio.currentTime=0;
+      const result=audio.play(); if(result&&typeof result.catch==='function')result.catch(()=>{});
+    }catch(_){ }
+  }
+
+
+  function ensureHeartbeatAudio(){
+    if(heartbeatAudio) return heartbeatAudio;
+    const asset = ASSETS.heartbeat;
+    if(!asset || !asset.src) return null;
+
+    try{
+      heartbeatAudio = new Audio(asset.src);
+      heartbeatAudio.loop = true;
+      heartbeatAudio.preload = 'auto';
+      heartbeatAudio.volume = 0;
+      heartbeatAudio.addEventListener('error', () => {
+        heartbeatUnlocked = false;
+      });
+    }catch(_){
+      heartbeatAudio = null;
+    }
+    return heartbeatAudio;
+  }
+
+  function unlockHeartbeat(){
+    if(heartbeatUnlocked) return;
+    const audio = ensureHeartbeatAudio();
+    if(!audio) return;
+
+    try{
+      audio.volume = 0;
+      const result = audio.play();
+      if(result && typeof result.then === 'function'){
+        result.then(() => {
+          heartbeatUnlocked = true;
+        }).catch(() => {});
+      } else {
+        heartbeatUnlocked = true;
+      }
+    }catch(_){}
+  }
+
+  function getContainmentFigure(){
+    return (ROOMS.containment.items || []).find(
+      item => item.kind === 'decor' && item.decorType === 'shadowPlayer'
+    );
+  }
+
+  function updateHeartbeat(){
+    const audio = heartbeatAudio;
+    if(!audio) return;
+
+    if(currentRoomId !== 'containment' || documentOpen){
+      audio.volume = 0;
+      return;
+    }
+
+    const figure = getContainmentFigure();
+    if(!figure){
+      audio.volume = 0;
+      return;
+    }
+
+    const distance = Math.hypot(player.x - figure.x, player.y - figure.y);
+    const t = Math.max(
+      0,
+      Math.min(
+        1,
+        (HEARTBEAT_MAX_DISTANCE - distance) /
+        (HEARTBEAT_MAX_DISTANCE - HEARTBEAT_FULL_DISTANCE)
+      )
+    );
+
+    audio.volume = Math.min(HEARTBEAT_MAX_VOLUME, HEARTBEAT_MAX_VOLUME * t);
+  }
+
+  function openAsset(assetId){
+    const asset=ASSETS[assetId]; if(!asset)return;
+    if(asset.pickupSound)playAudioAsset(asset.pickupSound);
+    if(asset.type==='image'){
+      documentOpen=true;
+      assetImage.src = asset.src || '';
+      assetImage.alt = asset.alt || asset.filename || 'Recovered image';
+      assetLayer.classList.add('open');
+      for(const key of Object.keys(held))held[key]=false;
+      resetJoystick();
+      assetClose.focus({preventScroll:true});
+    }
+  }
+
+  function closeDocument(){
+    if(!documentOpen)return;
+    documentOpen=false;
+    assetLayer.classList.remove('open');
+    assetImage.removeAttribute('src');
+    for(const key of Object.keys(held))held[key]=false;
+    resetJoystick();
+    game.focus({preventScroll:true});
+  }
+
+  function checkInteractions(){
+    const touchingNow=new Set();
+    for(const item of ROOMS[currentRoomId].items||[]){
+      if(item.kind!=='asset') continue;
+      const dx=player.x-item.x,dy=player.y-item.y,threshold=player.radius+item.radius;
+      if(dx*dx+dy*dy>threshold*threshold)continue;
+      touchingNow.add(item.id);
+      if(!touchingItems.has(item.id))openAsset(item.assetId);
+    }
+    touchingItems=touchingNow;
+  }
+
+  function update(dt){
+    if(documentOpen)return;
+    let dx=0,dy=0;
+    if(held.ArrowLeft)dx-=1; if(held.ArrowRight)dx+=1; if(held.ArrowUp)dy-=1; if(held.ArrowDown)dy+=1;
+    dx += stick.x;
+    dy += stick.y;
+    const magnitude = Math.hypot(dx,dy);
+    if(magnitude > 1){ dx /= magnitude; dy /= magnitude; }
+    const distance=player.speed*dt;
+    if(dx){
+      const nx=player.x+dx*distance,exit=findCrossedExit(nx,player.y);
+      if(exit){hardCutTo(exit);return;} if(canMoveTo(nx,player.y))player.x=nx;
+    }
+    if(dy){
+      const ny=player.y+dy*distance,exit=findCrossedExit(player.x,ny);
+      if(exit){hardCutTo(exit);return;} if(canMoveTo(player.x,ny))player.y=ny;
+    }
+    checkInteractions();
+  }
+
+  function raySegmentHit(px,py,angle,segment,maxDistance){
+    const rx=Math.cos(angle),ry=Math.sin(angle);
+    const sx=segment.x2-segment.x1,sy=segment.y2-segment.y1;
+    const denominator=rx*sy-ry*sx;
+    if(Math.abs(denominator)<1e-9)return null;
+    const qpx=segment.x1-px,qpy=segment.y1-py;
+    const t=(qpx*sy-qpy*sx)/denominator;
+    const u=(qpx*ry-qpy*rx)/denominator;
+    return (t>=0&&t<=maxDistance&&u>=0&&u<=1)?t:null;
+  }
+
+  function castRay(angle,segments){
+    let nearest=VISION_RADIUS,hitWall=false;
+    for(const segment of segments){
+      const t=raySegmentHit(player.x,player.y,angle,segment,VISION_RADIUS);
+      if(t!==null&&t<nearest){nearest=t;hitWall=true;}
+    }
+    const distance=hitWall?Math.min(VISION_RADIUS,nearest+WALL_REVEAL):VISION_RADIUS;
+    return {angle,x:player.x+Math.cos(angle)*distance,y:player.y+Math.sin(angle)*distance};
+  }
+
+  function getVisibilityPolygon(){
+    const segments=ROOMS[currentRoomId].segments,angles=[];
+    for(let i=0;i<64;i++)angles.push((i/64)*Math.PI*2-Math.PI);
+    for(const s of segments){
+      for(const [x,y] of [[s.x1,s.y1],[s.x2,s.y2]]){
+        const base=Math.atan2(y-player.y,x-player.x);
+        angles.push(base-RAY_EPSILON,base,base+RAY_EPSILON);
+      }
+    }
+    const points=angles.map(angle=>castRay(angle,segments));
+    points.sort((a,b)=>a.angle-b.angle);
+    return points;
+  }
+
+  function drawWalls(grid){
+    for(let r=0;r<ROWS;r++){
+      for(let c=0;c<COLS;c++){
+        const tile = grid[r][c];
+        if(tile===TILE_EMPTY) continue;
+        if(tile===TILE_WALL){
+          ctx.fillStyle=COLORS.wall;
+          ctx.fillRect(c*TILE,r*TILE,TILE,TILE);
+        } else if(tile===TILE_WINDOW){
+          const x = c*TILE;
+          const y = r*TILE;
+          ctx.fillStyle=COLORS.window;
+          ctx.fillRect(x,y,TILE,TILE);
+          ctx.strokeStyle='rgba(255,255,255,.14)';
+          ctx.lineWidth=1;
+          ctx.strokeRect(x+0.5,y+0.5,TILE-1,TILE-1);
+        }
+      }
+    }
+  }
+
+  function drawTable(item){
+    const x = item.x - item.width / 2;
+    const y = item.y - item.height / 2;
+    ctx.save();
+    ctx.fillStyle = COLORS.table;
+    ctx.globalAlpha = 0.9;
+    ctx.fillRect(x, y, item.width, item.height);
+    ctx.fillStyle = 'rgba(255,255,255,.08)';
+    ctx.fillRect(x + 2, y + 2, item.width - 4, 5);
+    ctx.fillStyle = COLORS.table;
+    ctx.globalAlpha = 0.8;
+    ctx.fillRect(x + 5, y + item.height - 2, 4, 10);
+    ctx.fillRect(x + item.width - 9, y + item.height - 2, 4, 10);
+    ctx.restore();
+  }
+
+  function drawPaper(item){
+    ctx.save();ctx.translate(item.x,item.y);ctx.globalAlpha=.9;ctx.fillStyle=COLORS.paper;ctx.fillRect(-8,-11,16,22);
+    ctx.fillStyle='#000';ctx.globalAlpha=.42;ctx.fillRect(-4,-5,8,1.5);ctx.fillRect(-4,-1,8,1.5);ctx.fillRect(-4,3,6,1.5);ctx.restore();
+  }
+
+
+  function drawDecor(item){
+    ctx.save();
+    if(item.decorType==='crate'){
+      const size=item.size||22;
+      const x=item.x-size/2,y=item.y-size/2;
+      ctx.fillStyle='rgba(115,110,102,.75)';
+      ctx.fillRect(x,y,size,size);
+      ctx.strokeStyle='rgba(255,255,255,.09)';
+      ctx.lineWidth=1;
+      ctx.strokeRect(x+.5,y+.5,size-1,size-1);
+      ctx.beginPath();ctx.moveTo(x+3,y+3);ctx.lineTo(x+size-3,y+size-3);ctx.moveTo(x+size-3,y+3);ctx.lineTo(x+3,y+size-3);ctx.stroke();
+    } else if(item.decorType==='console'){
+      const w=item.width||50,h=item.height||20;
+      const x=item.x-w/2,y=item.y-h/2;
+      ctx.fillStyle='rgba(70,68,66,.9)';ctx.fillRect(x,y,w,h);
+      ctx.fillStyle='rgba(255,255,255,.06)';ctx.fillRect(x+3,y+3,w-6,h-6);
+      ctx.fillStyle='rgba(205,35,48,.35)';ctx.fillRect(x+w-12,y+6,5,5);
+    } else if(item.decorType==='cabinet'){
+      const w=item.width||24,h=item.height||42;
+      const x=item.x-w/2,y=item.y-h/2;
+      ctx.fillStyle='rgba(90,86,82,.78)';ctx.fillRect(x,y,w,h);
+      ctx.strokeStyle='rgba(255,255,255,.08)';ctx.strokeRect(x+.5,y+.5,w-1,h-1);
+      ctx.beginPath();ctx.moveTo(x+w/2,y+2);ctx.lineTo(x+w/2,y+h-2);ctx.stroke();
+      ctx.fillStyle='rgba(255,255,255,.12)';ctx.fillRect(x+w/2-1,y+h/2-2,2,4);
+    } else if(item.decorType==='rack'){
+      const w=item.width||30,h=item.height||80;
+      const x=item.x-w/2,y=item.y-h/2;
+      ctx.strokeStyle='rgba(120,116,112,.75)';ctx.lineWidth=2;
+      ctx.strokeRect(x+1,y+1,w-2,h-2);
+      for(let yy=y+10; yy<y+h-4; yy+=14){ ctx.beginPath(); ctx.moveTo(x+3,yy); ctx.lineTo(x+w-3,yy); ctx.stroke(); }
+    } else if(item.decorType==='sign'){
+      const w=item.width||28,h=item.height||14;
+      const x=item.x-w/2,y=item.y-h/2;
+      ctx.fillStyle='rgba(180,180,180,.17)';ctx.fillRect(x,y,w,h);
+      ctx.fillStyle='rgba(255,255,255,.12)';ctx.fillRect(x+4,y+4,w-8,2);
+      ctx.fillRect(x+4,y+8,w-12,2);
+    } else if(item.decorType==='vent'){
+      const w=item.width||34,h=item.height||16;
+      const x=item.x-w/2,y=item.y-h/2;
+      ctx.fillStyle='rgba(125,123,120,.18)';ctx.fillRect(x,y,w,h);
+      ctx.strokeStyle='rgba(255,255,255,.08)';ctx.strokeRect(x+.5,y+.5,w-1,h-1);
+      for(let xx=x+5; xx<x+w-3; xx+=6){ ctx.beginPath(); ctx.moveTo(xx,y+3); ctx.lineTo(xx,y+h-3); ctx.stroke(); }
+    } else if(item.decorType==='marker'){
+      const size=item.size||18;
+      const x=item.x,y=item.y;
+      ctx.strokeStyle='rgba(205,35,48,.45)';ctx.lineWidth=2;
+      ctx.beginPath();ctx.moveTo(x-size/2,y+size/2);ctx.lineTo(x,y-size/2);ctx.lineTo(x+size/2,y+size/2);ctx.closePath();ctx.stroke();
+      ctx.beginPath();ctx.moveTo(x,y-size/5);ctx.lineTo(x,y+size/6);ctx.stroke();
+      ctx.fillStyle='rgba(205,35,48,.4)';ctx.fillRect(x-1,y+size/4,2,2);
+    } else if(item.decorType==='shadowPlayer'){
+      const x=item.x,y=item.y;
+      ctx.strokeStyle='#000';
+      ctx.fillStyle='#000';
+      ctx.lineWidth=3;
+      ctx.lineCap='round';
+      ctx.lineJoin='round';
+      ctx.shadowColor='rgba(255,255,255,.12)';
+      ctx.shadowBlur=3;
+      ctx.beginPath();ctx.arc(x,y-7,3.6,0,Math.PI*2);ctx.fill();
+      ctx.beginPath();ctx.moveTo(x,y-2);ctx.lineTo(x,y+7);
+      ctx.moveTo(x-6,y+1);ctx.lineTo(x+6,y+1);
+      ctx.moveTo(x,y+7);ctx.lineTo(x-5,y+13);
+      ctx.moveTo(x,y+7);ctx.lineTo(x+5,y+13);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function drawPlayer(){
+    const x=player.x,y=player.y;
+    ctx.save();ctx.strokeStyle=COLORS.player;ctx.fillStyle=COLORS.player;ctx.lineWidth=3;ctx.lineCap='round';ctx.lineJoin='round';
+    ctx.beginPath();ctx.arc(x,y-7,3.6,0,Math.PI*2);ctx.fill();
+    ctx.beginPath();ctx.moveTo(x,y-2);ctx.lineTo(x,y+7);ctx.moveTo(x-6,y+1);ctx.lineTo(x+6,y+1);ctx.moveTo(x,y+7);ctx.lineTo(x-5,y+13);ctx.moveTo(x,y+7);ctx.lineTo(x+5,y+13);ctx.stroke();ctx.restore();
+  }
+
+  function drawVisibility(){
+    const polygon=getVisibilityPolygon();
+    darkCtx.clearRect(0,0,W,H);darkCtx.globalCompositeOperation='source-over';darkCtx.fillStyle='rgba(0,0,0,.997)';darkCtx.fillRect(0,0,W,H);
+    if(polygon.length<3){ctx.drawImage(darknessCanvas,0,0);return;}
+
+    darkCtx.save();darkCtx.globalCompositeOperation='destination-out';
+    const reveal=darkCtx.createRadialGradient(player.x,player.y,16,player.x,player.y,VISION_RADIUS);
+    reveal.addColorStop(0,'rgba(0,0,0,.86)');
+    reveal.addColorStop(.28,'rgba(0,0,0,.62)');
+    reveal.addColorStop(.62,'rgba(0,0,0,.30)');
+    reveal.addColorStop(.88,'rgba(0,0,0,.08)');
+    reveal.addColorStop(1,'rgba(0,0,0,0)');
+    darkCtx.fillStyle=reveal;darkCtx.beginPath();darkCtx.moveTo(polygon[0].x,polygon[0].y);
+    for(let i=1;i<polygon.length;i++)darkCtx.lineTo(polygon[i].x,polygon[i].y);
+    darkCtx.closePath();darkCtx.fill();darkCtx.restore();
+
+    darkCtx.save();
+    darkCtx.beginPath();darkCtx.moveTo(polygon[0].x,polygon[0].y);
+    for(let i=1;i<polygon.length;i++)darkCtx.lineTo(polygon[i].x,polygon[i].y);
+    darkCtx.closePath();darkCtx.clip();
+    const tint=darkCtx.createRadialGradient(player.x,player.y,18,player.x,player.y,VISION_RADIUS);
+    tint.addColorStop(0,`rgba(245,245,240,${LIGHT_TINT_ALPHA})`);
+    tint.addColorStop(.45,'rgba(235,235,230,.028)');
+    tint.addColorStop(.78,'rgba(220,220,215,.012)');
+    tint.addColorStop(1,'rgba(210,210,205,0)');
+    darkCtx.fillStyle=tint;darkCtx.fillRect(0,0,W,H);
+    darkCtx.restore();
+
+    ctx.drawImage(darknessCanvas,0,0);
+
+    ctx.save();
+    ctx.strokeStyle=`rgba(235,235,230,${EDGE_OUTLINE_ALPHA})`;
+    ctx.lineWidth=.75;
+    ctx.beginPath();ctx.moveTo(polygon[0].x,polygon[0].y);
+    for(let i=1;i<polygon.length;i++)ctx.lineTo(polygon[i].x,polygon[i].y);
+    ctx.closePath();ctx.stroke();
+    ctx.restore();
+  }
+
+  function draw(){
+    ctx.clearRect(0,0,W,H);ctx.fillStyle=COLORS.background;ctx.fillRect(0,0,W,H);
+    const room=ROOMS[currentRoomId];drawWalls(room.grid);
+    for(const item of room.items||[]) if(item.kind==='decor') drawDecor(item);
+    for(const item of room.items||[]) if(item.kind==='table') drawTable(item);
+    for(const item of room.items||[]) if(item.kind==='asset') drawPaper(item);
+    drawPlayer();drawVisibility();drawPlayer();
+  }
+
+  function frame(now){
+    const dt=Math.min((now-lastTime)/1000,.035);lastTime=now;update(dt);updateRoomLabel(now);updateHeartbeat();draw();requestAnimationFrame(frame);
+  }
+
+  function updateJoystickKnob(){
+    const tx = stick.x * JOYSTICK_RADIUS;
+    const ty = stick.y * JOYSTICK_RADIUS;
+    joystickKnob.style.transform = `translate(calc(-50% + ${tx}px), calc(-50% + ${ty}px))`;
+  }
+
+  function resetJoystick(){
+    stick.active = false;
+    stick.x = 0;
+    stick.y = 0;
+    stick.pointerId = null;
+    updateJoystickKnob();
+  }
+
+  function setJoystickFromPointer(clientX, clientY){
+    const rect = joystickBase.getBoundingClientRect();
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top + rect.height / 2;
+    let dx = clientX - cx;
+    let dy = clientY - cy;
+    const distance = Math.hypot(dx, dy);
+    const max = JOYSTICK_RADIUS;
+    if(distance > max){
+      dx = (dx / distance) * max;
+      dy = (dy / distance) * max;
+    }
+    let nx = dx / max;
+    let ny = dy / max;
+    const mag = Math.hypot(nx, ny);
+    if(mag < JOYSTICK_DEADZONE){
+      nx = 0; ny = 0;
+    } else if(mag > 1) {
+      nx /= mag; ny /= mag;
+    }
+    stick.x = nx;
+    stick.y = ny;
+    updateJoystickKnob();
+  }
+
+  game.addEventListener('pointerdown',()=>{if(!documentOpen){unlockHeartbeat();game.focus({preventScroll:true});}});
+  game.addEventListener('keydown',event=>{if(!(event.key in held)||documentOpen)return;event.preventDefault();unlockHeartbeat();held[event.key]=true;});
+  game.addEventListener('keyup',event=>{if(!(event.key in held))return;event.preventDefault();held[event.key]=false;});
+  game.addEventListener('blur',()=>{for(const key of Object.keys(held))held[key]=false;});
+
+  joystickBase.addEventListener('pointerdown', (event) => {
+    if(documentOpen) return;
+    unlockHeartbeat();
+    event.preventDefault();
+    event.stopPropagation();
+    stick.active = true;
+    stick.pointerId = event.pointerId;
+    try { joystickBase.setPointerCapture(event.pointerId); } catch (_) {}
+    setJoystickFromPointer(event.clientX, event.clientY);
+    game.focus({preventScroll:true});
+  });
+
+  joystickBase.addEventListener('pointermove', (event) => {
+    if(!stick.active || event.pointerId !== stick.pointerId) return;
+    event.preventDefault();
+    setJoystickFromPointer(event.clientX, event.clientY);
+  });
+
+  function endStick(event){
+    if(event && stick.pointerId !== null && event.pointerId !== stick.pointerId) return;
+    resetJoystick();
+  }
+  joystickBase.addEventListener('pointerup', endStick);
+  joystickBase.addEventListener('pointercancel', endStick);
+  joystickBase.addEventListener('lostpointercapture', () => resetJoystick());
+  joystickBase.addEventListener('contextmenu', event => event.preventDefault());
+
+  assetClose.addEventListener('pointerdown',event=>event.stopPropagation());
+  assetClose.addEventListener('click',event=>{event.preventDefault();event.stopPropagation();closeDocument();});
+  assetLayer.addEventListener('pointerdown',event=>{if(event.target===assetLayer)closeDocument();});
+  assetImage.addEventListener('pointerdown',event=>event.stopPropagation());
+  root.addEventListener('keydown',event=>{if(event.key==='Escape'&&documentOpen){event.preventDefault();closeDocument();}});
+
+  setRoomLabel(ROOMS[currentRoomId].name);
+  updateJoystickKnob();
+  draw();requestAnimationFrame(frame);
+})();
